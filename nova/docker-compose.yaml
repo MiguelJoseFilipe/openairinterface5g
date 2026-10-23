@@ -1,0 +1,51 @@
+# SPDX-License-Identifier: MIT
+#
+# NOVA non-terrestrial gNB: band 66 FDD, 106 PRB, USRP X310, satellite Doppler emulation.
+#
+#   python3 ../tools/ntn_doppler/TCP_server.py --config ../tools/ntn_doppler/config.txt
+#   docker compose up -d
+#
+# The clock server must be running first: the gNB waits for the clock synchronization at
+# startup (REMOTE_IP in config.txt). The image is built from this branch, see README.md.
+
+services:
+    gnb_mono_ntn_fdd:
+        image: oai-gnb:nova-ntn
+        container_name: sa-ntn-gnb
+        cap_drop:
+            - ALL
+        cap_add:
+            - SYS_NICE
+            - IPC_LOCK
+        ulimits:
+          core: -1 # for core dumps
+        environment:
+            # No -E: 106 PRB runs at 61.44 MHz, an integer division of the X310 184.32 MHz clock.
+            USE_ADDITIONAL_OPTIONS: --log_config.global_log_options level,nocolor,time --parallel-config PARALLEL_RU_L1_TRX_SPLIT --usrp-tx-thread-config 1
+        # Non-blocking logging: with the default synchronous driver, the late/underflow markers
+        # UHD prints under load block the real-time threads.
+        logging:
+            driver: json-file
+            options:
+                mode: non-blocking
+                max-buffer-size: 16m
+                max-size: 100m
+                max-file: "3"
+        volumes:
+            - ./conf/gnb.sa.band66.106prb.usrpx310.ntn.conf:/opt/oai-gnb/etc/gnb.conf
+            # Doppler emulation: config.txt is read from this path; the quasi-earth-fixed table
+            # is looked up next to it
+            - ../tools/ntn_doppler/config.txt:/opt/oai-gnb/etc/config.txt
+            - ../tools/ntn_doppler/qef_table.csv:/opt/oai-gnb/etc/qef_table.csv
+        # host networking: the X310 is reached over 10 GbE, the clock server and the core over
+        # the host network
+        network_mode: "host"
+        # Physical cores of NUMA node 0 (the node of the 10 GbE NICs), without hyperthread siblings
+        # and without the NIC interrupt cores 0 and 2. Matches the thread layout of the conf;
+        # adapt both to the host.
+        cpuset: "4,6,8,10,12,14,16,18,20,22,24,26,28,30,32,34"
+        healthcheck:
+            test: /bin/bash -c "ps aux | grep -v grep | grep -c softmodem"
+            interval: 10s
+            timeout: 5s
+            retries: 5
