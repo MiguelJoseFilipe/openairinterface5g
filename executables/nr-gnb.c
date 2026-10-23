@@ -42,6 +42,8 @@
 #include "thread-pool.h"
 #include "time_meas.h"
 #include "utils.h"
+#include "SCHED_NR/nr_doppler_shift.h"
+#include "NR_MAC_gNB/mac_config.h"
 
 #define TICK_TO_US(ts) (ts.trials==0?0:ts.diff/ts.trials)
 #define L1STATSSTRLEN 16384
@@ -66,6 +68,28 @@ static void tx_func(processingData_L1tx_t *info)
   }
 
   clear_slot_beamid(gNB, slot_tx);
+
+  /* NTN: refresh the SIB19 ephemeris so the UE derives its timing advance and
+     Doppler from the orbit applied in tx_rf(). Done in the L1 TX thread, before
+     the slot indication: nr_update_sib19() holds NR_SCHED_LOCK while encoding,
+     and a lower-priority thread holding it would stall this one. */
+  const int sib19_period = nr_doppler_get_sib19_period();
+  if (slot_tx == 0 && sib19_period > 0 && frame_tx % sib19_period == 0) {
+    double sat_pos[3], sat_vel[3];
+    if (nr_doppler_get_sat_state(sat_pos, sat_vel) == 0) {
+      const gnb_sat_position_update_t sat_position = {
+          .sfn = frame_tx,
+          .subframe = 0,
+          .delay = 0, // regenerative payload: no feeder link
+          .drift = 0,
+          .accel = 0,
+          // SIB19 granularity: 1.3 m for position, 0.06 m/s for velocity
+          .position = {sat_pos[0] / 1.3, sat_pos[1] / 1.3, sat_pos[2] / 1.3},
+          .velocity = {sat_vel[0] / 0.06, sat_vel[1] / 0.06, sat_vel[2] / 0.06},
+      };
+      nr_update_sib19(&sat_position);
+    }
+  }
 
   nfapi_nr_slot_indication_scf_t ind = {.sfn = frame_tx, .slot = slot_tx};
   start_meas(&gNB->slot_indication_stats);
@@ -105,6 +129,10 @@ static void tx_func(processingData_L1tx_t *info)
     syncMsgRU.ru = gNB->RU_list[0];
     syncMsgRU.timestamp_tx = info->timestamp_tx;
     LOG_D(PHY, "gNB: %d.%d : calling RU TX function\n", syncMsgRU.frame_tx, syncMsgRU.slot_tx);
+    syncMsgRU.ru->tx_freq_offset_hz = nr_doppler_get_current_hz();
+    if (frame_tx % 100 == 0 && slot_tx == 0)
+      LOG_I(PHY, "[DOPPLER] frame %d: tx_freq_offset_hz = %.2f Hz\n",
+            frame_tx, syncMsgRU.ru->tx_freq_offset_hz);
     ru_tx_func((void *)&syncMsgRU);
     stop_meas(&info->gNB->phy_proc_tx);
   }

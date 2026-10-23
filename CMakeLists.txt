@@ -1832,6 +1832,7 @@ add_executable(nr-softmodem
   ${OPENAIR_DIR}/common/utils/lte/prach_utils.c
   ${PHY_INTERFACE_DIR}/queue_t.c
   ${OPENAIR1_DIR}/PHY/TOOLS/phy_scope_interface.c
+  ${OPENAIR1_DIR}/SCHED_NR/nr_doppler_shift.c
   )
 
 target_link_libraries(nr-softmodem PRIVATE

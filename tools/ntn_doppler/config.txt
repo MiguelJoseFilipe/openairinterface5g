@@ -1,0 +1,35 @@
+# NTN Doppler and propagation delay emulation for the gNB RU.
+# The gNB reads this file from /opt/oai-gnb/etc/config.txt; the emulation is
+# disabled when the file is absent. The clock server reads the same file:
+#   python3 TCP_server.py --config config.txt
+
+### Pass ###
+Maximum elevation = 70
+Carrier frequency = 2169090000   # Hz, must match the gNB DL carrier
+
+## Clock server ##
+REMOTE_IP = 127.0.0.1
+
+## Propagation delay ##
+# One-way delay d(t) = slant_range(t)/c, applied on the downlink (tx_rf) and on
+# the uplink (rx_rf), so the round trip is 2*d.
+#   0 -> off
+#   1 -> relative: d(t) - min d, zero at maximum elevation
+#   2 -> absolute: d(t)
+# In TDD the delay must stay inside the guard period.
+Delay mode = 0
+
+## SIB19 ephemeris refresh ##
+# Period in frames (100 = 1 s). 0 keeps the static ephemeris of the gNB conf.
+SIB19 period = 100
+
+## Satellite model ##
+# 0 -> earth-moving: analytic circular orbit (600 km) over a non-rotating
+#      spherical Earth; the UE sees the full Doppler at its position.
+# 1 -> quasi-earth-fixed: pass played back from "QEF table"; the beam-center
+#      Doppler is pre-compensated and the UE sees the residual.
+Doppler model = 0
+# Path relative to the directory of this file
+QEF table = qef_table.csv
+# 0 -> all rows, 1 -> only rows with masked = 1
+QEF window = 1

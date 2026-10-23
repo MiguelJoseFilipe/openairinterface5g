@@ -48,6 +48,7 @@ static int DEFRUTPCORES[] = {-1,-1,-1,-1};
 #include "nfapi_interface.h"
 #include <nfapi/oai_integration/vendor_ext.h>
 #include "executables/nr-softmodem-common.h"
+#include "SCHED_NR/nr_doppler_shift.h"
 
 static void NRRCconfig_RU(configmodule_interface_t *cfg);
 
@@ -337,6 +338,70 @@ void fh_if4p5_north_out(RU_t *ru)
   stop_meas(&ru->tx_fhaul);
 }
 
+/* NTN uplink propagation delay: the slot is read from the radio and its
+ * timestamp reported as usual, but L1 gets the samples received `delay`
+ * samples earlier, kept in a per-antenna ring. */
+static unsigned int ntn_rx_read_delayed(RU_t *ru,
+                                        const NR_DL_FRAME_PARMS *fp,
+                                        openair0_timestamp_t *ts,
+                                        void **rxp,
+                                        uint32_t nsamps,
+                                        int nb,
+                                        uint64_t delay)
+{
+  if (ru->ntn_rx_ring_len == 0) {
+    const double fs_hz = (double)fp->samples_per_subframe * 1000.0;
+    const uint64_t max_delay = (uint64_t)(nr_doppler_get_max_delay_s() * fs_hz);
+    // one extra subframe of headroom so a slot never overruns the write pointer
+    ru->ntn_rx_ring_len = max_delay + fp->samples_per_subframe;
+    ru->ntn_rx_ring = calloc(nb, sizeof(*ru->ntn_rx_ring));
+    ru->ntn_rx_scratch = calloc(nb, sizeof(*ru->ntn_rx_scratch));
+    AssertFatal(ru->ntn_rx_ring && ru->ntn_rx_scratch, "NTN UL delay line alloc failed\n");
+    for (int i = 0; i < nb; i++) {
+      ru->ntn_rx_ring[i] = calloc(ru->ntn_rx_ring_len, sizeof(c16_t));
+      ru->ntn_rx_scratch[i] = calloc(fp->samples_per_subframe, sizeof(c16_t));
+      AssertFatal(ru->ntn_rx_ring[i] && ru->ntn_rx_scratch[i], "NTN UL delay line alloc failed\n");
+    }
+    ru->ntn_rx_wr = 0;
+    LOG_I(PHY, "[DOPPLER] UL delay line: %" PRIu64 " samples/antenna (%.3f ms), %d antennas\n",
+          ru->ntn_rx_ring_len, 1000.0 * (double)ru->ntn_rx_ring_len / fs_hz, nb);
+  }
+
+  AssertFatal(nsamps <= fp->samples_per_subframe, "slot of %u samples exceeds scratch\n", nsamps);
+  AssertFatal(delay + nsamps <= ru->ntn_rx_ring_len,
+              "NTN UL delay %" PRIu64 " + %u samples exceeds ring %" PRIu64 "\n",
+              delay, nsamps, ru->ntn_rx_ring_len);
+
+  void *scratch[nb];
+  for (int i = 0; i < nb; i++)
+    scratch[i] = ru->ntn_rx_scratch[i];
+
+  const unsigned int rxs = ru->rfdevice.trx_read_func(&ru->rfdevice, ts, scratch, nsamps, nb);
+
+  const uint64_t L = ru->ntn_rx_ring_len;
+  const uint64_t wr = ru->ntn_rx_wr;
+  // read window ends where the fresh slot begins, `delay` samples further back
+  const uint64_t rd = (wr + L - delay) % L;
+
+  for (int i = 0; i < nb; i++) {
+    // fresh slot -> ring at wr
+    const uint64_t first = (wr + nsamps <= L) ? nsamps : L - wr;
+    memcpy(&ru->ntn_rx_ring[i][wr], ru->ntn_rx_scratch[i], first * sizeof(c16_t));
+    if (first < nsamps)
+      memcpy(&ru->ntn_rx_ring[i][0], &ru->ntn_rx_scratch[i][first], (nsamps - first) * sizeof(c16_t));
+
+    // ring at rd -> the buffer L1 will process
+    c16_t *out = (c16_t *)rxp[i];
+    const uint64_t rfirst = (rd + nsamps <= L) ? nsamps : L - rd;
+    memcpy(out, &ru->ntn_rx_ring[i][rd], rfirst * sizeof(c16_t));
+    if (rfirst < nsamps)
+      memcpy(&out[rfirst], &ru->ntn_rx_ring[i][0], (nsamps - rfirst) * sizeof(c16_t));
+  }
+
+  ru->ntn_rx_wr = (wr + nsamps) % L;
+  return rxs;
+}
+
 static void rx_rf(RU_t *ru, int *frame, int *slot)
 {
   RU_proc_t *proc = &ru->proc;
@@ -356,7 +421,13 @@ static void rx_rf(RU_t *ru, int *frame, int *slot)
 
   openair0_timestamp_t ts;
   unsigned int rxs;
-  rxs = ru->rfdevice.trx_read_func(&ru->rfdevice, &ts, rxp, samples_per_slot, nb);
+  // NTN: delay the uplink by the same d(t) as the downlink in tx_rf()
+  const uint64_t ntn_ul_delay =
+      (uint64_t)(nr_doppler_get_delay_s() * (double)fp->samples_per_subframe * 1000.0);
+  if (ntn_ul_delay == 0)
+    rxs = ru->rfdevice.trx_read_func(&ru->rfdevice, &ts, rxp, samples_per_slot, nb);
+  else
+    rxs = ntn_rx_read_delayed(ru, fp, &ts, rxp, samples_per_slot, nb, ntn_ul_delay);
   proc->timestamp_rx = ts-ru->ts_offset;
 
   if (rxs != samples_per_slot)
@@ -568,9 +639,44 @@ void tx_rf(RU_t *ru, int frame,int slot, uint64_t timestamp)
   for (int i = 0; i < nt; i++)
     txp[i] = (void *)&ru->common.txdata[i][get_samples_slot_timestamp(fp, slot)] - sf_extension * sizeof(int32_t);
 
+  const double fs_hz = (double)fp->samples_per_subframe * 1000.0;
+
+  // NTN propagation delay: the DL burst is written with a later timestamp.
+  // In TDD the delay must stay inside the guard period.
+  const uint64_t ntn_delay_samples = (uint64_t)(nr_doppler_get_delay_s() * fs_hz);
+
+  // Doppler shift: rotate each TX sample by e^(j*2pi*f*n/fs), with the phase
+  // taken from the absolute sample timestamp
+  double f_off = ru->tx_freq_offset_hz;
+  if (f_off != 0.0) {
+    double fs = fs_hz;
+    float delta_angle = (float)(2.0 * M_PI * f_off / fs);
+    float cos_d = cosf(delta_angle);
+    float sin_d = sinf(delta_angle);
+    // Absolute USRP sample index for sample 0 of this slot
+    double abs_ts = (double)timestamp + (double)ru->ts_offset + (double)ntn_delay_samples;
+    float start_re = cosf((float)fmod(2.0 * M_PI * f_off * abs_ts / fs, 2.0 * M_PI));
+    float start_im = sinf((float)fmod(2.0 * M_PI * f_off * abs_ts / fs, 2.0 * M_PI));
+    int buf_offset = get_samples_slot_timestamp(fp, slot);
+    for (int ant = 0; ant < nt; ant++) {
+      c16_t *buf = (c16_t *)&ru->common.txdata[ant][buf_offset];
+      float pre = start_re, pim = start_im;
+      for (int n = 0; n < siglen; n++) {
+        float I = (float)buf[n].r;
+        float Q = (float)buf[n].i;
+        buf[n].r = (int16_t)(I * pre - Q * pim);
+        buf[n].i = (int16_t)(I * pim + Q * pre);
+        float new_re = pre * cos_d - pim * sin_d;
+        float new_im = pre * sin_d + pim * cos_d;
+        pre = new_re;
+        pim = new_im;
+      }
+    }
+  }
+
   // prepare tx buffer pointers
   uint32_t txs = ru->rfdevice.trx_write_func(&ru->rfdevice,
-                                             timestamp + ru->ts_offset - sf_extension,
+                                             timestamp + ru->ts_offset - sf_extension + ntn_delay_samples,
                                              txp,
                                              siglen + sf_extension,
                                              nt,
@@ -579,7 +685,7 @@ void tx_rf(RU_t *ru, int frame,int slot, uint64_t timestamp)
         "[TXPATH] RU %d tx_rf, writing to TS %lu, %d.%d, unwrapped_frame %d, slot %d, flags %d, siglen+sf_extension %d, "
         "returned %d, E %f\n",
         ru->idx,
-        timestamp + ru->ts_offset - sf_extension,
+        timestamp + ru->ts_offset - sf_extension + ntn_delay_samples,
         frame,
         slot,
         proc->frame_tx_unwrap,
@@ -1193,6 +1299,15 @@ void init_NR_RU(configmodule_interface_t *cfg, char *rf_config_file)
     ru->rf_config_file = rf_config_file;
     ru->idx            = ru_id;
     ru->ts_offset      = 0;
+    ru->tx_freq_offset_hz = 0.0;
+    ru->ntn_rx_ring       = NULL;
+    ru->ntn_rx_scratch    = NULL;
+    ru->ntn_rx_ring_len   = 0;
+    ru->ntn_rx_wr         = 0;
+
+    // NTN Doppler and delay emulation, enabled when config.txt is present
+    if (ru_id == 0)
+      nr_doppler_init("/opt/oai-gnb/etc/config.txt", 65432);
     // use gNB_list[0] as a reference for RU frame parameters
     // NOTE: multiple CC_id are not handled here yet!
 

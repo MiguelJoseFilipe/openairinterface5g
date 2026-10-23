@@ -608,6 +608,16 @@ typedef struct RU_t_s {
   /// number of cores for RU ThreadPool
   int num_tpcores;
   void* scopeData;
+  /// TX frequency offset in Hz applied via per-sample phasor rotation (+ = up, - = down)
+  double tx_freq_offset_hz;
+  /// NTN uplink delay line: per-antenna ring of received samples (see rx_rf)
+  struct complex16 **ntn_rx_ring;
+  /// per-antenna scratch for one slot of freshly read samples
+  struct complex16 **ntn_rx_scratch;
+  /// samples per antenna in ntn_rx_ring (0 until first use)
+  uint64_t ntn_rx_ring_len;
+  /// ring write pointer, in samples
+  uint64_t ntn_rx_wr;
 } RU_t;
 
 
