@@ -1,0 +1,52 @@
+# SPDX-License-Identifier: MIT
+#
+# NOVA terrestrial gNB: band n78, 273 PRB, USRP X310, SISO or 2x2 MIMO.
+#
+#   GNB_CONF=gnb.sa.band78.273prb.usrpx310.siso.conf docker compose up -d
+#   GNB_CONF=gnb.sa.band78.273prb.usrpx310.2x2.conf  docker compose up -d
+#
+# The image is built from this branch, see README.md.
+
+services:
+    gnb_mono_tdd:
+        image: oai-gnb:nova-fixes
+        container_name: sa-x310-gnb
+        restart: unless-stopped
+        cap_drop:
+            - ALL
+        cap_add:
+            - SYS_NICE
+            - IPC_LOCK
+        ulimits:
+          core: -1 # for core dumps
+        environment:
+            USE_B2XX: "no"
+            # -E: three-quarter sampling. 273 PRB then runs at 184.32 MHz, the X310 master clock,
+            # instead of 122.88 MHz, which is not an integer division of it.
+            # 192.168.30.2 / 192.168.40.2: X310 default addresses of its two 10 GbE ports.
+            USE_ADDITIONAL_OPTIONS: -E --log_config.global_log_options level,nocolor,time,line_num,function --RUs.[0].sdr_addrs addr=192.168.30.2,second_addr=192.168.40.2,clock_source=internal,time_source=internal --parallel-config PARALLEL_RU_L1_TRX_SPLIT --usrp-tx-thread-config 1
+        # Non-blocking logging: with the default synchronous driver, the late/underflow markers
+        # UHD prints under load block the real-time threads.
+        logging:
+            driver: json-file
+            options:
+                mode: non-blocking
+                max-buffer-size: 16m
+                max-size: 100m
+                max-file: "3"
+        devices:
+            - /dev/bus/usb/:/dev/bus/usb/
+        volumes:
+            - ./conf/${GNB_CONF:-gnb.sa.band78.273prb.usrpx310.2x2.conf}:/opt/oai-gnb/etc/gnb.conf
+        # host networking: the X310 is reached over 10 GbE and the core over the host network
+        network_mode: "host"
+        # Physical cores of NUMA node 0 (the node of the 10 GbE NICs), without hyperthread siblings
+        # and without the NIC interrupt cores 0 and 2. Matches the thread layout of the confs;
+        # adapt both to the host.
+        cpuset: "4,6,8,10,12,14,16,18,20,22,24,26,28,30,32,34"
+        healthcheck:
+            # pgrep does NOT work
+            test: /bin/bash -c "ps aux | grep -v grep | grep -c softmodem"
+            interval: 10s
+            timeout: 5s
+            retries: 5
