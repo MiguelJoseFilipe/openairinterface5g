@@ -7,6 +7,11 @@
 Maximum elevation = 70
 Carrier frequency = 2169090000   # Hz, must match the gNB DL carrier
 
+## Calibration ##
+# 1 -> transmit a constant Doppler ("Calibration Doppler Hz") instead of the pass
+Calibration Mode = 0
+Calibration Doppler Hz = 0
+
 ## Clock server ##
 REMOTE_IP = 127.0.0.1
 

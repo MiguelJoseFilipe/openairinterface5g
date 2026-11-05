@@ -93,6 +93,8 @@ typedef struct {
   double pass_start;                  // experiment time at the start of the pass (s)
   double vis_time;                    // duration of the pass (s); the server loops over it
   int    tx_started;                  // 1 from the first transmitted slot (atomic access)
+  int    calibration;                 // "Calibration Mode": transmit a constant Doppler
+  double calibration_doppler_hz;      // "Calibration Doppler Hz": that constant Doppler
 } NR_DopplerContext;
 
 extern NR_DopplerContext g_doppler_ctx;
@@ -114,7 +116,8 @@ void nr_doppler_mark_tx(void);
 /*
  * Doppler frequency offset (Hz) at the current experiment time.
  * Thread-safe; returns 0.0 if the table is not ready or before the first
- * transmitted slot.
+ * transmitted slot. In calibration mode ("Calibration Mode = 1"), returns the
+ * constant "Calibration Doppler Hz" instead of the pass.
  */
 double nr_doppler_get_current_hz(void);
 

@@ -122,7 +122,9 @@ static int parse_config(const char *path,
                         int    *model,
                         int    *qef_window,
                         char   *qef_table,
-                        size_t  qef_table_len)
+                        size_t  qef_table_len,
+                        int    *calibration,
+                        double *calibration_doppler_hz)
 {
   FILE *f = fopen(path, "r");
   if (!f) {
@@ -137,6 +139,8 @@ static int parse_config(const char *path,
   *sib19_period = 100;
   *model        = NR_DOPPLER_MODEL_EARTH_MOVING;
   *qef_window   = 1;
+  *calibration  = 0;
+  *calibration_doppler_hz = 0.0;
   strncpy(server_ip, "127.0.0.1", server_ip_len - 1);
   strncpy(qef_table, "qef_table.csv", qef_table_len - 1);
 
@@ -161,6 +165,10 @@ static int parse_config(const char *path,
       sscanf(eq + 13, "%d", qef_window);
     else if ((eq = strstr(line, "QEF table = ")))
       sscanf(eq + 12, "%255s", qef_table);
+    else if ((eq = strstr(line, "Calibration Mode = ")))
+      sscanf(eq + 19, "%d", calibration);
+    else if ((eq = strstr(line, "Calibration Doppler Hz = ")))
+      sscanf(eq + 25, "%lf", calibration_doppler_hz);
   }
 
   fclose(f);
@@ -186,6 +194,8 @@ static int parse_config(const char *path,
   static const char *delay_mode_str[] = {"off", "relative", "absolute"};
   printf("[DOPPLER] config: max_elev=%d deg  carrier=%.7e Hz  server=%s  delay=%s\n",
          *max_elev_deg, *carrier_hz, server_ip, delay_mode_str[*delay_mode]);
+  if (*calibration)
+    printf("[DOPPLER] calibration mode: constant Doppler %.1f Hz\n", *calibration_doppler_hz);
   return 0;
 }
 
@@ -510,7 +520,9 @@ int nr_doppler_init(const char *config_path, int server_port)
                    &g_doppler_ctx.model,
                    &g_doppler_ctx.qef_window,
                    g_doppler_ctx.qef_table,
-                   sizeof(g_doppler_ctx.qef_table)) != 0)
+                   sizeof(g_doppler_ctx.qef_table),
+                   &g_doppler_ctx.calibration,
+                   &g_doppler_ctx.calibration_doppler_hz) != 0)
     return -1;
 
   // The pass, as served by the clock server: [-vis/2, vis/2], looped
@@ -553,7 +565,11 @@ void nr_doppler_mark_tx(void)
 
 double nr_doppler_get_current_hz(void)
 {
-  if (!g_doppler_ctx.table || !__atomic_load_n(&g_doppler_ctx.tx_started, __ATOMIC_ACQUIRE))
+  if (!g_doppler_ctx.table)
+    return 0.0;
+  if (g_doppler_ctx.calibration)
+    return g_doppler_ctx.calibration_doppler_hz;
+  if (!__atomic_load_n(&g_doppler_ctx.tx_started, __ATOMIC_ACQUIRE))
     return 0.0;
 
   size_t i;
