@@ -5,7 +5,9 @@
 /*
  * Satellite Doppler shift and propagation delay emulation for the gNB RU.
  *
- * The experiment clock is synchronized with a TCP time server, then a Doppler /
+ * The experiment clock comes from a TCP time server. The server starts the pass
+ * when the gNB reports its first transmitted slot ("started"); the gNB then
+ * re-synchronizes every second, with the network latency compensated. A Doppler /
  * delay / ephemeris source is built for one of two satellite models
  * ("Doppler model" in config.txt):
  *
@@ -87,20 +89,32 @@ typedef struct {
   NR_QefRow *qef;                     // rows of the selected window, qef[i] at t_start + i*dt
 
   int    server_connected;            // 1 after successful TCP sync
+  int    sockfd;                      // connection to the clock server
+  double pass_start;                  // experiment time at the start of the pass (s)
+  double vis_time;                    // duration of the pass (s); the server loops over it
+  int    tx_started;                  // 1 from the first transmitted slot (atomic access)
 } NR_DopplerContext;
 
 extern NR_DopplerContext g_doppler_ctx;
 
 /*
- * Parse config_path, synchronize with the TCP clock server on server_port and
- * build the Doppler table. Blocks until the clock sync is done (about 5 s).
- * Returns 0 on success.
+ * Parse config_path, connect to the TCP clock server on server_port and build
+ * the Doppler table. The pass clock starts at the first transmitted slot, see
+ * nr_doppler_mark_tx(). Returns 0 on success.
  */
 int nr_doppler_init(const char *config_path, int server_port);
 
 /*
+ * Called for every transmitted slot (tx_rf()). At the first one, starts the local
+ * pass clock at the beginning of the pass and lets the clock thread send
+ * "started" to the server. Cheap after the first call.
+ */
+void nr_doppler_mark_tx(void);
+
+/*
  * Doppler frequency offset (Hz) at the current experiment time.
- * Thread-safe; returns 0.0 if the table is not ready.
+ * Thread-safe; returns 0.0 if the table is not ready or before the first
+ * transmitted slot.
  */
 double nr_doppler_get_current_hz(void);
 

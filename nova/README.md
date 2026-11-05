@@ -35,7 +35,8 @@ docker compose logs -f
 docker compose down
 ```
 
-The clock starts when the gNB connects and runs over the visible part of the pass.
+The pass clock starts at the first slot the gNB transmits and loops over the visible part of the
+pass. The gNB re-synchronizes with it every second.
 
 ## Notes
 

@@ -571,6 +571,7 @@ static radio_tx_gpio_flag_t get_gpio_flags(RU_t *ru, int slot)
 
 void tx_rf(RU_t *ru, int frame,int slot, uint64_t timestamp)
 {
+  nr_doppler_mark_tx(); // NTN: the pass clock starts at the first transmitted slot
   RU_proc_t *proc = &ru->proc;
   NR_DL_FRAME_PARMS *fp = ru->nr_frame_parms;
   nfapi_nr_config_request_scf_t *cfg = &ru->config;

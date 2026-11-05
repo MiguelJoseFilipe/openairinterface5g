@@ -52,15 +52,40 @@ static double now_seconds(void)
   return (double)ts.tv_sec + (double)ts.tv_nsec * 1e-9;
 }
 
-// Current experiment time
+// Monotonic clock in seconds, for round-trip measurements
+static double mono_seconds(void)
+{
+  struct timespec ts;
+  clock_gettime(CLOCK_MONOTONIC, &ts);
+  return (double)ts.tv_sec + (double)ts.tv_nsec * 1e-9;
+}
+
+static void set_times(double experiment_time, double wall_time)
+{
+  pthread_mutex_lock(&g_doppler_ctx.times_mutex);
+  g_doppler_ctx.times.experiment_time = experiment_time;
+  g_doppler_ctx.times.start_time      = wall_time;
+  pthread_mutex_unlock(&g_doppler_ctx.times_mutex);
+}
+
+// Current experiment time: the start of the pass until the first transmitted slot,
+// then wrapped over the pass like the server clock
 static double current_exp_time(void)
 {
+  if (!__atomic_load_n(&g_doppler_ctx.tx_started, __ATOMIC_ACQUIRE))
+    return g_doppler_ctx.pass_start;
   double exp_t, start_t;
   pthread_mutex_lock(&g_doppler_ctx.times_mutex);
   exp_t   = g_doppler_ctx.times.experiment_time;
   start_t = g_doppler_ctx.times.start_time;
   pthread_mutex_unlock(&g_doppler_ctx.times_mutex);
-  return now_seconds() - start_t + exp_t;
+  double t = now_seconds() - start_t + exp_t;
+  if (g_doppler_ctx.vis_time > 0.0) {
+    t = g_doppler_ctx.pass_start + fmod(t - g_doppler_ctx.pass_start, g_doppler_ctx.vis_time);
+    if (t < g_doppler_ctx.pass_start)
+      t += g_doppler_ctx.vis_time;
+  }
+  return t;
 }
 
 // One-way propagation delay (s) at experiment time t: slant range between
@@ -167,40 +192,29 @@ static int parse_config(const char *path,
 // ---------------------------------------------------------------------------
 // TCP clock client
 // ---------------------------------------------------------------------------
-typedef struct {
-  char server_ip[64];
-  int  server_port;
-} ServerClockArgs;
-
-static void *server_clock_thread(void *arg)
+// Connect to the clock server and identify as "oai_gnb". Returns the socket, or -1.
+static int clock_connect(const char *server_ip, int server_port)
 {
-  ServerClockArgs *a = (ServerClockArgs *)arg;
-
   int sockfd = socket(AF_INET, SOCK_STREAM, 0);
   if (sockfd < 0) {
     perror("[DOPPLER] socket");
-    g_doppler_ctx.server_connected = 0;
-    return NULL;
+    return -1;
   }
 
   struct sockaddr_in addr = {0};
   addr.sin_family = AF_INET;
-  addr.sin_port   = htons((uint16_t)a->server_port);
-  if (inet_pton(AF_INET, a->server_ip, &addr.sin_addr) <= 0) {
-    fprintf(stderr, "[DOPPLER] Invalid server IP: %s\n", a->server_ip);
+  addr.sin_port   = htons((uint16_t)server_port);
+  if (inet_pton(AF_INET, server_ip, &addr.sin_addr) <= 0) {
+    fprintf(stderr, "[DOPPLER] Invalid server IP: %s\n", server_ip);
     close(sockfd);
-    g_doppler_ctx.server_connected = 0;
-    return NULL;
+    return -1;
   }
 
   if (connect(sockfd, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
     perror("[DOPPLER] connect");
     close(sockfd);
-    g_doppler_ctx.server_connected = 0;
-    return NULL;
+    return -1;
   }
-
-  g_doppler_ctx.server_connected = 1;
 
   // Handshake: receive server prompt, send identifier, receive confirmation
   char buf[1024] = {0};
@@ -211,39 +225,92 @@ static void *server_clock_thread(void *arg)
   memset(buf, 0, sizeof(buf));
   recv(sockfd, buf, sizeof(buf) - 1, 0);
   printf("[DOPPLER] Server: %s\n", buf);
+  return sockfd;
+}
 
-  sleep(5); // let all clients register before querying the time
+// Server pass time corrected for the network latency: N probes, keep the one with
+// the smallest round trip and add half of it. Returns NAN on failure.
+static double clock_query(int sockfd)
+{
+  const int n_probes = 5;
+  int have_best = 0;
+  double best_server = 0.0, best_half_rtt = 0.0, best_recv = 0.0;
 
-  // Query experiment time from server
-  const char *query = "time?";
-  send(sockfd, query, strlen(query), 0);
+  for (int p = 0; p < n_probes; p++) {
+    const char *query = "time?";
+    const double t0 = mono_seconds();
+    if (send(sockfd, query, strlen(query), 0) < 0)
+      break;
+    // 8-byte big-endian double
+    uint8_t raw[8];
+    int got = 0;
+    while (got < 8) {
+      int n = recv(sockfd, raw + got, 8 - got, 0);
+      if (n <= 0) {
+        got = -1;
+        break;
+      }
+      got += n;
+    }
+    const double t1 = mono_seconds();
+    if (got != 8)
+      break;
+    uint8_t host[8];
+    for (int k = 0; k < 8; k++)
+      host[k] = raw[7 - k];
+    double server_t;
+    memcpy(&server_t, host, sizeof(server_t));
 
-  double server_time = 0.0;
-  int n = recv(sockfd, &server_time, sizeof(server_time), 0);
-  if (n != (int)sizeof(server_time)) {
-    fprintf(stderr, "[DOPPLER] Failed to receive time from server (got %d bytes)\n", n);
-    close(sockfd);
-    g_doppler_ctx.server_connected = 0;
-    return NULL;
+    const double rtt = t1 - t0;
+    if (!have_best || rtt < 2.0 * best_half_rtt) {
+      have_best     = 1;
+      best_server   = server_t;
+      best_half_rtt = rtt / 2.0;
+      best_recv     = t1;
+    }
   }
 
-  // Server sends a big-endian double
-  uint8_t *p = (uint8_t *)&server_time;
-  for (int i = 0; i < 4; i++) {
-    uint8_t tmp = p[i]; p[i] = p[7 - i]; p[7 - i] = tmp;
+  if (!have_best)
+    return NAN;
+  return best_server + best_half_rtt + (mono_seconds() - best_recv);
+}
+
+// Waits for the first transmitted slot, asks the server to start the pass clock
+// ("started"), then re-synchronizes the local pass clock every second. The server
+// starts its clock only once, so a restarted gNB takes the current pass time and
+// rejoins the pass in phase.
+static void *server_clock_thread(void *arg)
+{
+  (void)arg;
+  const int sockfd = g_doppler_ctx.sockfd;
+
+  int waited_ms = 0;
+  while (!__atomic_load_n(&g_doppler_ctx.tx_started, __ATOMIC_ACQUIRE)) {
+    if (waited_ms >= 120000) {
+      fprintf(stderr, "[DOPPLER] No transmitted slot within 120 s: pass clock not started\n");
+      return NULL;
+    }
+    usleep(20000);
+    waited_ms += 20;
   }
 
-  close(sockfd);
+  const char *msg = "started";
+  send(sockfd, msg, strlen(msg), 0);
+  char ack[64] = {0};
+  recv(sockfd, ack, sizeof(ack) - 1, 0);
 
-  // Record local start time right after the query, then store both atomically
-  double local_start = now_seconds();
-  pthread_mutex_lock(&g_doppler_ctx.times_mutex);
-  g_doppler_ctx.times.experiment_time = server_time;
-  g_doppler_ctx.times.start_time      = local_start;
-  pthread_mutex_unlock(&g_doppler_ctx.times_mutex);
-
-  printf("[DOPPLER] Clock sync done:  experiment_time=%.6f s  start_time=%.6f s\n",
-         server_time, local_start);
+  int first = 1;
+  for (;;) {
+    const double server_t = clock_query(sockfd);
+    if (!isnan(server_t)) {
+      set_times(server_t, now_seconds());
+      if (first) {
+        printf("[DOPPLER] Pass clock started: experiment_time=%.6f s\n", server_t);
+        first = 0;
+      }
+    }
+    sleep(1);
+  }
   return NULL;
 }
 
@@ -446,39 +513,47 @@ int nr_doppler_init(const char *config_path, int server_port)
                    sizeof(g_doppler_ctx.qef_table)) != 0)
     return -1;
 
-  // Synchronize the experiment clock
-  static ServerClockArgs clock_args;
-  memcpy(clock_args.server_ip, g_doppler_ctx.server_ip, sizeof(clock_args.server_ip));
-  clock_args.server_port = server_port;
+  // The pass, as served by the clock server: [-vis/2, vis/2], looped
+  g_doppler_ctx.vis_time   = ds_t_v(g_doppler_ctx.max_elevation_deg);
+  g_doppler_ctx.pass_start = -g_doppler_ctx.vis_time / 2.0;
+  set_times(g_doppler_ctx.pass_start, now_seconds());
 
-  pthread_t clock_tid;
-  pthread_create(&clock_tid, NULL, server_clock_thread, &clock_args);
-  pthread_join(clock_tid, NULL);
-
+  g_doppler_ctx.sockfd = clock_connect(g_doppler_ctx.server_ip, server_port);
+  g_doppler_ctx.server_connected = g_doppler_ctx.sockfd >= 0;
   if (!g_doppler_ctx.server_connected) {
-    fprintf(stderr, "[DOPPLER] Server clock sync failed, Doppler emulation disabled\n");
+    fprintf(stderr, "[DOPPLER] Clock server not connected, Doppler emulation disabled\n");
     return -1;
   }
 
+  int ret;
   if (g_doppler_ctx.model == NR_DOPPLER_MODEL_QUASI_EARTH_FIXED)
-    return load_qef_table(config_path);
+    ret = load_qef_table(config_path);
+  else // earth-moving: table over the whole pass
+    ret = build_table(g_doppler_ctx.max_elevation_deg,
+                      g_doppler_ctx.carrier_freq_hz,
+                      g_doppler_ctx.pass_start, -g_doppler_ctx.pass_start, 0.1);
+  if (ret != 0)
+    return ret;
 
-  // Earth-moving: table from the server time to the end of the visibility window
-  double vis    = ds_t_v(g_doppler_ctx.max_elevation_deg);
-  double t_start = g_doppler_ctx.times.experiment_time;
-  double t_end   = vis / 2.0;
-
-  if (build_table(g_doppler_ctx.max_elevation_deg,
-                  g_doppler_ctx.carrier_freq_hz,
-                  t_start, t_end, 0.1) != 0)
-    return -1;
-
+  pthread_t clock_tid;
+  pthread_create(&clock_tid, NULL, server_clock_thread, NULL);
+  pthread_detach(clock_tid);
   return 0;
+}
+
+void nr_doppler_mark_tx(void)
+{
+  if (__atomic_load_n(&g_doppler_ctx.tx_started, __ATOMIC_ACQUIRE) || !g_doppler_ctx.table)
+    return;
+  // First transmitted slot: start the local pass clock at the beginning of the pass;
+  // the clock thread then synchronizes it with the server
+  set_times(g_doppler_ctx.pass_start, now_seconds());
+  __atomic_store_n(&g_doppler_ctx.tx_started, 1, __ATOMIC_RELEASE);
 }
 
 double nr_doppler_get_current_hz(void)
 {
-  if (!g_doppler_ctx.table)
+  if (!g_doppler_ctx.table || !__atomic_load_n(&g_doppler_ctx.tx_started, __ATOMIC_ACQUIRE))
     return 0.0;
 
   size_t i;

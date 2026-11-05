@@ -5,8 +5,9 @@
 #   python3 ../tools/ntn_doppler/TCP_server.py --config ../tools/ntn_doppler/config.txt
 #   docker compose up -d
 #
-# The clock server must be running first: the gNB waits for the clock synchronization at
-# startup (REMOTE_IP in config.txt). The image is built from this branch, see README.md.
+# The clock server must be running first: the gNB connects to it at startup (REMOTE_IP in
+# config.txt), and the Doppler emulation is off if it cannot. The image is built from this
+# branch, see README.md.
 
 services:
     gnb_mono_ntn_fdd:
