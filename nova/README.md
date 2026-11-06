@@ -40,6 +40,9 @@ For the nrUE, after the first two lines:
 docker build --target oai-nr-ue --tag oai-nr-ue:nova-fixes --file docker/Dockerfile.nrUE.ubuntu .
 ```
 
+Build from a clone with its submodules (`git clone --recurse-submodules`). In a git worktree, or without the
+submodules, the configuration stops at `openair2/E2AP/CMakeLists.txt`.
+
 ## Run
 
 The gNB connects to an OAI 5G core (`oai-cn5g-fed`, `docker-compose-basic-nrf.yaml`) on its default
