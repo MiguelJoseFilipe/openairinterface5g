@@ -6,6 +6,7 @@ X310, OAI 5G core. The 273 PRB cell is the one measured. An OAI nrUE can attach 
 | File | Content |
 |---|---|
 | `conf/gnb.sa.band78.<273,106,51>prb.usrpx310.<siso,2x2>.conf` | gNB configurations |
+| `conf/gnb.sa.band78.51prb.usrpb210.siso.conf` | gNB configuration on a B210 |
 | `conf/nrue.band78.<106,51>prb.env` | nrUE settings of each cell |
 | `conf/nrue.uicc.conf` | example nrUE SIM, with the keys of the OAI test subscriber |
 | `docker-compose.yaml` | gNB container |
@@ -56,7 +57,8 @@ docker compose down
 ```
 
 `GNB_SDR_ADDRS` replaces the X310 addresses, for instance `addr=192.168.40.2` on a single link. `GNB_IMAGE`
-replaces the image, and `GNB_EXTRA_OPTIONS` adds options.
+replaces the image, and `GNB_EXTRA_OPTIONS` adds options. `GNB_CPUSET` replaces the cores, and a B210 needs
+`GNB_USE_B2XX=yes`.
 
 ## Run the nrUE
 
@@ -86,6 +88,9 @@ For a 2x2 cell, add `--ue-nb-ant-tx 2 --ue-nb-ant-rx 2` to `UE_EXTRA_OPTIONS`.
   and the container `cpuset` are specific to the host used for the measurements (cores of NUMA node 0).
   Adapt them together.
 - The X310 addresses are its factory defaults (192.168.30.2 and 192.168.40.2).
+- 51 PRB: the nrUE rejects a correct SSS under the absolute floor `SSS_METRIC_FLOOR_NR`, so a weak UE can take
+  minutes to sync. `tx_amp_backoff_dB = 30` raises the DL by 6 dB to clear it. A UE close to the gNB can then
+  overload and fail to decode SIB1: lower its gain with `--ue-rxgain` in `UE_EXTRA_OPTIONS`.
 
 ## Provenance of the measurements
 

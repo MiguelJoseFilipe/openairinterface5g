@@ -20,7 +20,7 @@ services:
         ulimits:
           core: -1 # for core dumps
         environment:
-            USE_B2XX: "no"
+            USE_B2XX: ${GNB_USE_B2XX:-no}
             # -E: three-quarter sampling. 273 PRB then runs at 184.32 MHz, the X310 master clock,
             # instead of 122.88 MHz, which is not an integer division of it.
             # 192.168.30.2 / 192.168.40.2: X310 default addresses of its two 10 GbE ports.
@@ -43,7 +43,7 @@ services:
         # Physical cores of NUMA node 0 (the node of the 10 GbE NICs), without hyperthread siblings
         # and without the NIC interrupt cores 0 and 2. Matches the thread layout of the confs;
         # adapt both to the host.
-        cpuset: "4,6,8,10,12,14,16,18,20,22,24,26,28,30,32,34"
+        cpuset: "${GNB_CPUSET:-4,6,8,10,12,14,16,18,20,22,24,26,28,30,32,34}"
         healthcheck:
             # pgrep does NOT work
             test: /bin/bash -c "ps aux | grep -v grep | grep -c softmodem"
