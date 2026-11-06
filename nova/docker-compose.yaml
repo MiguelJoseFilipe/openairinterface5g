@@ -9,7 +9,7 @@
 
 services:
     gnb_mono_tdd:
-        image: oai-gnb:nova-fixes
+        image: ${GNB_IMAGE:-oai-gnb:nova-fixes}
         container_name: sa-x310-gnb
         restart: unless-stopped
         cap_drop:
@@ -24,7 +24,7 @@ services:
             # -E: three-quarter sampling. 273 PRB then runs at 184.32 MHz, the X310 master clock,
             # instead of 122.88 MHz, which is not an integer division of it.
             # 192.168.30.2 / 192.168.40.2: X310 default addresses of its two 10 GbE ports.
-            USE_ADDITIONAL_OPTIONS: -E --log_config.global_log_options level,nocolor,time,line_num,function --RUs.[0].sdr_addrs addr=192.168.30.2,second_addr=192.168.40.2,clock_source=internal,time_source=internal --parallel-config PARALLEL_RU_L1_TRX_SPLIT --usrp-tx-thread-config 1
+            USE_ADDITIONAL_OPTIONS: -E --log_config.global_log_options level,nocolor,time,line_num,function --RUs.[0].sdr_addrs ${GNB_SDR_ADDRS:-addr=192.168.30.2,second_addr=192.168.40.2,clock_source=internal,time_source=internal} --parallel-config PARALLEL_RU_L1_TRX_SPLIT --usrp-tx-thread-config 1 ${GNB_EXTRA_OPTIONS:-}
         # Non-blocking logging: with the default synchronous driver, the late/underflow markers
         # UHD prints under load block the real-time threads.
         logging:

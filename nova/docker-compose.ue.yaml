@@ -1,0 +1,32 @@
+# nrUE container. Cell settings from conf/nrue.band78.<prb>.env, radio from UE_USRP_ARGS:
+#   docker compose -f docker-compose.ue.yaml --env-file conf/nrue.band78.106prb.env up -d
+services:
+    nr_ue:
+        image: ${UE_IMAGE:-oai-nr-ue:nova-fixes}
+        container_name: sa-nr-ue
+        cap_drop:
+            - ALL
+        cap_add:
+            - NET_ADMIN
+            - NET_RAW
+            - SYS_NICE
+            - IPC_LOCK
+        ulimits:
+          core: -1 # for core dumps
+        environment:
+            USE_B2XX: "yes" # shortcut: downloads the B2xx firmware at every start, needed only by a B210
+            USE_ADDITIONAL_OPTIONS: -E -r ${UE_PRB:?} --numerology 1 --band 78 -C ${UE_CARRIER_HZ:?} --ssb ${UE_SSB:?} --ue-fo-compensation --usrp-args ${UE_USRP_ARGS:-type=b200} --log_config.global_log_options level,nocolor,time ${UE_EXTRA_OPTIONS:-}
+        logging:
+            driver: json-file
+            options:
+                mode: non-blocking
+                max-buffer-size: 16m
+                max-size: 100m
+                max-file: "3"
+        devices:
+            - /dev/net/tun:/dev/net/tun
+            - /dev/bus/usb/:/dev/bus/usb/
+        volumes:
+            - ${UE_UICC:-./conf/nrue.uicc.conf}:/opt/oai-nr-ue/etc/nr-ue.conf
+        network_mode: "host"
+        cpuset: "${UE_CPUSET:-}"
