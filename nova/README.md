@@ -7,6 +7,7 @@ Deployment of the non-terrestrial 5G cell measured on the NOVA platform: band 66
 | File | Content |
 |---|---|
 | `conf/gnb.sa.band66.106prb.usrpx310.ntn.conf` | gNB configuration, including `ntn-Config-r17` for SIB19 |
+| `conf/gnb.sa.band256.106prb.usrpx310.ntn.conf` | same cell in NTN band n256 (DL 2170-2200 MHz), 106 PRB at 15 kHz |
 | `docker-compose.yaml` | gNB container |
 | `../tools/ntn_doppler/config.txt` | Doppler emulation: pass, satellite model, delay mode, clock server |
 | `../tools/ntn_doppler/TCP_server.py` | experiment clock server |
