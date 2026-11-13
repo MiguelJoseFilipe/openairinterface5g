@@ -124,7 +124,9 @@ static int parse_config(const char *path,
                         char   *qef_table,
                         size_t  qef_table_len,
                         int    *calibration,
-                        double *calibration_doppler_hz)
+                        double *calibration_doppler_hz,
+                        double *beam_radius_km,
+                        double *power_offset_db)
 {
   FILE *f = fopen(path, "r");
   if (!f) {
@@ -141,6 +143,8 @@ static int parse_config(const char *path,
   *qef_window   = 1;
   *calibration  = 0;
   *calibration_doppler_hz = 0.0;
+  *beam_radius_km = 0.0;
+  *power_offset_db = 0.0;
   strncpy(server_ip, "127.0.0.1", server_ip_len - 1);
   strncpy(qef_table, "qef_table.csv", qef_table_len - 1);
 
@@ -169,6 +173,10 @@ static int parse_config(const char *path,
       sscanf(eq + 19, "%d", calibration);
     else if ((eq = strstr(line, "Calibration Doppler Hz = ")))
       sscanf(eq + 25, "%lf", calibration_doppler_hz);
+    else if ((eq = strstr(line, "Beam radius km = ")))
+      sscanf(eq + 17, "%lf", beam_radius_km);
+    else if ((eq = strstr(line, "Power offset dB = ")))
+      sscanf(eq + 18, "%lf", power_offset_db);
   }
 
   fclose(f);
@@ -194,6 +202,19 @@ static int parse_config(const char *path,
   static const char *delay_mode_str[] = {"off", "relative", "absolute"};
   printf("[DOPPLER] config: max_elev=%d deg  carrier=%.7e Hz  server=%s  delay=%s\n",
          *max_elev_deg, *carrier_hz, server_ip, delay_mode_str[*delay_mode]);
+  if (*beam_radius_km < 0.0 || *beam_radius_km > 2000.0) {
+    fprintf(stderr, "[DOPPLER] invalid Beam radius km %.1f, beam gain off\n", *beam_radius_km);
+    *beam_radius_km = 0.0;
+  }
+  if (*beam_radius_km > 0.0 && *model != NR_DOPPLER_MODEL_QUASI_EARTH_FIXED) {
+    fprintf(stderr, "[DOPPLER] Beam radius km needs the quasi-earth-fixed model, beam gain off\n");
+    *beam_radius_km = 0.0;
+  }
+  if (*power_offset_db > 0.0) // positive gain would clip the int16 samples
+    fprintf(stderr, "[DOPPLER] Power offset dB %.1f > 0: TX samples may clip\n", *power_offset_db);
+  if (*beam_radius_km > 0.0)
+    printf("[DOPPLER] beam gain: -3 dB ground radius %.1f km at nadir, power offset %.1f dB\n",
+           *beam_radius_km, *power_offset_db);
   if (*calibration)
     printf("[DOPPLER] calibration mode: constant Doppler %.1f Hz\n", *calibration_doppler_hz);
   return 0;
@@ -373,14 +394,40 @@ static int build_table(double theta_max_deg, double carrier_hz,
 }
 
 // ---------------------------------------------------------------------------
+// Beam gain (TR 38.811 6.4.1 aperture antenna)
+// ---------------------------------------------------------------------------
+#define DS_X3DB 1.6163399483107 // 2 J1(x)/x = 1/sqrt(2): the -3 dB point of the pattern
+
+// Half HPBW (rad) of a nadir beam whose -3 dB edge is r_m (m) from the sub-satellite point
+static double beam_half_hpbw(double r_m)
+{
+  const double g = r_m / DS_RE; // central angle
+  return atan2(DS_RE * sin(g), DS_H + DS_RE * (1.0 - cos(g)));
+}
+
+// ka of the aperture with that HPBW
+static double beam_ka(double r_m)
+{
+  return DS_X3DB / sin(beam_half_hpbw(r_m));
+}
+
+// Field amplitude of the aperture pattern relative to boresight: 2|J1(x)/x|, 1 at x = 0
+static double aperture_amplitude(double x)
+{
+  return fabs(x) < 1e-9 ? 1.0 : fabs(2.0 * j1(x) / x);
+}
+
+// ---------------------------------------------------------------------------
 // Quasi-earth-fixed table
 // ---------------------------------------------------------------------------
 // CSV, '#' comment header, rows evenly spaced in time:
 //   t_s, rr_center, rr_device, range_device, sat_x, sat_y, sat_z,
-//   sat_vx, sat_vy, sat_vz, masked
+//   sat_vx, sat_vy, sat_vz, masked[, off_axis_deg]
 // t_s is the experiment time (s), rr_* are range rates (m/s), range_device is
 // the slant range to the device (m), sat_* the satellite ECEF state (m, m/s),
-// masked is 1 when both beam center and device are above the elevation mask.
+// masked is 1 when both beam center and device are above the elevation mask,
+// off_axis_deg the angle at the satellite between beam center and device
+// (optional column, needed for the beam gain).
 // The table holds geometry only: the Doppler is formed with the configured carrier.
 static int load_qef_table(const char *config_path)
 {
@@ -417,11 +464,14 @@ static int load_qef_table(const char *config_path)
         break;
     }
     NR_QefRow *r = &rows[n];
-    if (sscanf(line, "%lf,%lf,%lf,%lf,%lf,%lf,%lf,%lf,%lf,%lf,%d",
+    double off_deg = NAN;
+    if (sscanf(line, "%lf,%lf,%lf,%lf,%lf,%lf,%lf,%lf,%lf,%lf,%d,%lf",
                &t[n], &r->rr_center, &r->rr_device, &r->range_device,
                &r->pos[0], &r->pos[1], &r->pos[2], &r->vel[0], &r->vel[1], &r->vel[2],
-               &masked[n]) == 11)
+               &masked[n], &off_deg) >= 11) {
+      r->off_axis = off_deg * M_PI / 180.0;
       n++;
+    }
   }
   fclose(f);
   if (!t || !masked || !rows || n < 2) {
@@ -476,6 +526,31 @@ static int load_qef_table(const char *config_path)
   g_doppler_ctx.delay_ref_s = dmin;
   g_doppler_ctx.delay_max_s = dmax;
 
+  if (g_doppler_ctx.beam_radius_km > 0.0) {
+    double *amp = malloc(m * sizeof(*amp));
+    if (!amp) {
+      perror("[DOPPLER] malloc");
+      free(t); free(masked); free(rows);
+      return -1;
+    }
+    const double ka = beam_ka(g_doppler_ctx.beam_radius_km * 1000.0);
+    const double k0 = pow(10.0, g_doppler_ctx.power_offset_db / 20.0);
+    double a_lo = 1e30, a_hi = 0.0;
+    for (size_t i = 0; i < m; i++) {
+      if (isnan(qef[i].off_axis)) {
+        fprintf(stderr, "[DOPPLER] QEF table %s has no off_axis_deg column: regenerate it for the beam gain\n", path);
+        free(t); free(masked); free(rows); free(amp);
+        return -1;
+      }
+      amp[i] = k0 * aperture_amplitude(ka * sin(qef[i].off_axis)) * DS_H / qef[i].range_device;
+      a_lo = fmin(a_lo, amp[i]); a_hi = fmax(a_hi, amp[i]);
+    }
+    g_doppler_ctx.amp = amp;
+    printf("[DOPPLER] beam gain: HPBW %.3f deg (ka %.2f), DL gain %.1f .. %.1f dB over the window\n",
+           2.0 * beam_half_hpbw(g_doppler_ctx.beam_radius_km * 1000.0) * 180.0 / M_PI, ka,
+           20.0 * log10(fmax(a_lo, 1e-15)), 20.0 * log10(a_hi));
+  }
+
   printf("[DOPPLER] QEF table %s: %zu of %zu rows, t=[%.2f, %.2f] s, dt=%.3f s\n",
          path, m, n, t[first], t[last], dt);
   printf("[DOPPLER] QEF residual Doppler %.1f .. %.1f Hz at %.7e Hz, device delay %.1f .. %.1f us\n",
@@ -522,7 +597,9 @@ int nr_doppler_init(const char *config_path, int server_port)
                    g_doppler_ctx.qef_table,
                    sizeof(g_doppler_ctx.qef_table),
                    &g_doppler_ctx.calibration,
-                   &g_doppler_ctx.calibration_doppler_hz) != 0)
+                   &g_doppler_ctx.calibration_doppler_hz,
+                   &g_doppler_ctx.beam_radius_km,
+                   &g_doppler_ctx.power_offset_db) != 0)
     return -1;
 
   // The pass, as served by the clock server: [-vis/2, vis/2], looped
@@ -582,6 +659,17 @@ double nr_doppler_get_current_hz(void)
 
   // Earth-moving: nearest row below
   return g_doppler_ctx.table[i];
+}
+
+double nr_doppler_get_current_amplitude(void)
+{
+  if (!g_doppler_ctx.amp || g_doppler_ctx.calibration)
+    return 1.0;
+  size_t i;
+  double frac;
+  table_locate(current_exp_time(), &i, &frac);
+  const double *a = g_doppler_ctx.amp;
+  return frac > 0.0 ? a[i] + frac * (a[i + 1] - a[i]) : a[i];
 }
 
 int nr_doppler_get_sat_state(double pos[3], double vel[3])
@@ -667,6 +755,8 @@ void nr_doppler_cleanup(void)
 {
   free(g_doppler_ctx.table);
   free(g_doppler_ctx.qef);
+  free(g_doppler_ctx.amp);
+  g_doppler_ctx.amp        = NULL;
   g_doppler_ctx.qef        = NULL;
   g_doppler_ctx.table      = NULL;
   g_doppler_ctx.table_size = 0;

@@ -17,6 +17,14 @@
  *                      precomputed table (see load_qef_table()). The satellite
  *                      pre-compensates the beam-center Doppler, so the UE only
  *                      sees the residual  -f_c/c * (rr_device - rr_center).
+ *
+ * Beam gain ("Beam radius km" in config.txt, QUASI_EARTH_FIXED only): the DL
+ * amplitude follows the device's link relative to boresight at the altitude,
+ *   a(t) = 10^(offset/20) * g(theta(t)) * h / range_device(t),
+ * g = TR 38.811 6.4.1 aperture pattern (amplitude 2|J1(x)/x|, x = ka sin theta),
+ * ka set by the HPBW of a nadir beam whose -3 dB edge lies at the given ground
+ * radius, theta = off-axis angle of the device. a <= 1 for offset <= 0: the
+ * physical attenuators fix the SNR at a = 1, the RU scales below it.
  */
 
 #ifndef NR_DOPPLER_SHIFT_H
@@ -60,6 +68,7 @@ typedef struct {
   double range_device; // slant range satellite -> device (m)
   double pos[3];       // satellite position, ECEF/ITRS (m)
   double vel[3];       // satellite velocity, ECEF/ITRS (m/s)
+  double off_axis;     // angle at the satellite, beam center -> device (rad); NAN if not in the table
 } NR_QefRow;
 
 typedef struct {
@@ -95,6 +104,9 @@ typedef struct {
   int    tx_started;                  // 1 from the first transmitted slot (atomic access)
   int    calibration;                 // "Calibration Mode": transmit a constant Doppler
   double calibration_doppler_hz;      // "Calibration Doppler Hz": that constant Doppler
+  double beam_radius_km;              // "Beam radius km": -3 dB ground radius at nadir, 0 = beam gain off
+  double power_offset_db;             // "Power offset dB": constant DL gain added to the beam gain (<= 0)
+  double *amp;                        // DL amplitude per row (QEF with beam gain), NULL = 1
 } NR_DopplerContext;
 
 extern NR_DopplerContext g_doppler_ctx;
@@ -120,6 +132,13 @@ void nr_doppler_mark_tx(void);
  * constant "Calibration Doppler Hz" instead of the pass.
  */
 double nr_doppler_get_current_hz(void);
+
+/*
+ * DL amplitude factor at the current experiment time (beam gain, see the top of
+ * this file), interpolated like the Doppler. 1.0 when the beam gain is off and
+ * in calibration mode. Thread-safe.
+ */
+double nr_doppler_get_current_amplitude(void);
 
 /*
  * Satellite position (m) and velocity (m/s) at the current experiment time,

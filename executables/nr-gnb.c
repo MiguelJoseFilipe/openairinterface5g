@@ -9,6 +9,7 @@
 #define _GNU_SOURCE
 #undef MALLOC //there are two conflicting definitions, so we better make sure we don't use it at all
 
+#include <math.h>
 #include <fcntl.h> // for SEEK_SET
 #include <pthread.h> // for pthread_join
 #include <stdint.h>
@@ -130,9 +131,10 @@ static void tx_func(processingData_L1tx_t *info)
     syncMsgRU.timestamp_tx = info->timestamp_tx;
     LOG_D(PHY, "gNB: %d.%d : calling RU TX function\n", syncMsgRU.frame_tx, syncMsgRU.slot_tx);
     syncMsgRU.ru->tx_freq_offset_hz = nr_doppler_get_current_hz();
+    syncMsgRU.ru->tx_amplitude = nr_doppler_get_current_amplitude();
     if (frame_tx % 100 == 0 && slot_tx == 0)
-      LOG_I(PHY, "[DOPPLER] frame %d: tx_freq_offset_hz = %.2f Hz\n",
-            frame_tx, syncMsgRU.ru->tx_freq_offset_hz);
+      LOG_I(PHY, "[DOPPLER] frame %d: tx_freq_offset_hz = %.2f Hz, tx_gain_db = %.2f\n",
+            frame_tx, syncMsgRU.ru->tx_freq_offset_hz, 20.0 * log10(fmax(syncMsgRU.ru->tx_amplitude, 1e-15)));
     ru_tx_func((void *)&syncMsgRU);
     stop_meas(&info->gNB->phy_proc_tx);
   }

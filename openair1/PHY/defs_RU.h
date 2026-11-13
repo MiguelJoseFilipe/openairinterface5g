@@ -610,6 +610,8 @@ typedef struct RU_t_s {
   void* scopeData;
   /// TX frequency offset in Hz applied via per-sample phasor rotation (+ = up, - = down)
   double tx_freq_offset_hz;
+  /// TX amplitude factor (NTN beam gain), applied with the Doppler rotation; 1 = unchanged
+  double tx_amplitude;
   /// NTN uplink delay line: per-antenna ring of received samples (see rx_rf)
   struct complex16 **ntn_rx_ring;
   /// per-antenna scratch for one slot of freshly read samples
