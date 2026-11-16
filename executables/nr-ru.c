@@ -646,20 +646,28 @@ void tx_rf(RU_t *ru, int frame,int slot, uint64_t timestamp)
   // In TDD the delay must stay inside the guard period.
   const uint64_t ntn_delay_samples = (uint64_t)(nr_doppler_get_delay_s() * fs_hz);
 
-  // Doppler shift: rotate each TX sample by e^(j*2pi*f*n/fs), with the phase
-  // taken from the absolute sample timestamp; the phasor also carries the
-  // beam-gain amplitude
+  // Doppler shift: rotate each TX sample by e^(j*phase(n)), phase(n) = integral of the Doppler
+  // over the on-air sample clock. The phase at the first sample of this slot is carried from the
+  // previous slot, so the signal stays phase-continuous when the Doppler changes from slot to slot
+  // (2*pi*f*abs_ts would jump by 2*pi*df*t at every slot) and across slots not transmitted (TDD UL).
+  // shortcut: one static phase state, valid because tx_rf runs in the single L1 TX thread with one RU.
+  // The phasor also carries the beam-gain amplitude.
   double f_off = ru->tx_freq_offset_hz;
   const float amp = (float)ru->tx_amplitude;
+  static double ntn_phase = 0.0, ntn_f_prev = 0.0, ntn_ts_prev = -1.0;
+  // Absolute USRP sample index for sample 0 of this slot
+  const double abs_ts = (double)timestamp + (double)ru->ts_offset + (double)ntn_delay_samples;
+  if (ntn_ts_prev >= 0.0)
+    ntn_phase = fmod(ntn_phase + 2.0 * M_PI * ntn_f_prev * (abs_ts - ntn_ts_prev) / fs_hz, 2.0 * M_PI);
+  ntn_ts_prev = abs_ts;
+  ntn_f_prev = f_off;
   if (f_off != 0.0 || amp != 1.0f) {
     double fs = fs_hz;
     float delta_angle = (float)(2.0 * M_PI * f_off / fs);
     float cos_d = cosf(delta_angle);
     float sin_d = sinf(delta_angle);
-    // Absolute USRP sample index for sample 0 of this slot
-    double abs_ts = (double)timestamp + (double)ru->ts_offset + (double)ntn_delay_samples;
-    float start_re = amp * cosf((float)fmod(2.0 * M_PI * f_off * abs_ts / fs, 2.0 * M_PI));
-    float start_im = amp * sinf((float)fmod(2.0 * M_PI * f_off * abs_ts / fs, 2.0 * M_PI));
+    float start_re = amp * cosf((float)ntn_phase);
+    float start_im = amp * sinf((float)ntn_phase);
     int buf_offset = get_samples_slot_timestamp(fp, slot);
     for (int ant = 0; ant < nt; ant++) {
       c16_t *buf = (c16_t *)&ru->common.txdata[ant][buf_offset];
