@@ -49,6 +49,7 @@ static int DEFRUTPCORES[] = {-1,-1,-1,-1};
 #include <nfapi/oai_integration/vendor_ext.h>
 #include "executables/nr-softmodem-common.h"
 #include "SCHED_NR/nr_doppler_shift.h"
+#include "SCHED_NR/nr_ntn_delay_line.h"
 
 static void NRRCconfig_RU(configmodule_interface_t *cfg);
 
@@ -642,21 +643,42 @@ void tx_rf(RU_t *ru, int frame,int slot, uint64_t timestamp)
 
   const double fs_hz = (double)fp->samples_per_subframe * 1000.0;
 
-  // NTN propagation delay: the DL burst is written with a later timestamp.
-  // In TDD the delay must stay inside the guard period.
-  const uint64_t ntn_delay_samples = (uint64_t)(nr_doppler_get_delay_s() * fs_hz);
+  // NTN propagation delay d(t): a constant whole-sample part goes in the write timestamp (so consecutive
+  // slots stay contiguous for the radio) and the varying rest is applied inside the samples by a delay
+  // line stepping one cyclic-prefix sample at slot starts (nr_ntn_delay_line.h). Writing each slot at
+  // timestamp + d(t)*fs instead made slots overlap or leave a one-sample gap (rfsim), and over the air the
+  // X310 ignores timestamps inside a running burst, so no delay at all reached the antenna (tests 2026-11-25).
+  // shortcut: static state, valid because tx_rf runs in the single L1 TX thread with one RU.
+  static ntn_delay_line_t ntn_dl;
+  static int64_t ntn_base = 0; // constant part of the delay in the write timestamp (samples)
+  if (!ntn_dl.len && nr_doppler_get_max_delay_s() > 0.0) {
+    AssertFatal(nt <= NTN_DL_MAX_ANT, "NTN DL delay line: %d TX streams > %d\n", nt, NTN_DL_MAX_ANT);
+    ntn_base = (int64_t)floor(nr_doppler_get_min_delay_s() * fs_hz);
+    AssertFatal(ntn_dl_init(&ntn_dl, nt, nr_doppler_get_max_delay_s() * fs_hz - (double)ntn_base + 1.0, fp->samples_per_subframe) == 0,
+                "NTN DL delay line init failed\n");
+    LOG_I(PHY, "[DOPPLER] DL delay line: base %" PRId64 " samples (%.3f ms) in the timestamp, ring %" PRIu64 " samples/antenna\n",
+          ntn_base, 1000.0 * (double)ntn_base / fs_hz, ntn_dl.len);
+  }
+  if (ntn_dl.len) {
+    // the line assumes a contiguous input stream: no TDD bursts, no sf_extension
+    AssertFatal(sf_extension == 0 && siglen == get_samples_per_slot(slot, fp), "NTN DL delay needs continuous TX (FDD or continuous_tx)\n");
+    // in place: the USRP write thread queues the txdata pointers, a separate output buffer would be
+    // overwritten by the next slot before it is sent (OTA test 2026-11-25: PSS lost in 0.4% of SSB periods)
+    ntn_dl_process(&ntn_dl, txp, txp, siglen, nr_doppler_get_delay_s() * fs_hz - (double)ntn_base);
+  }
+  const int64_t ntn_ts = (int64_t)timestamp + (int64_t)ru->ts_offset - sf_extension + ntn_base;
 
   // Doppler shift: rotate each TX sample by e^(j*phase(n)), phase(n) = integral of the Doppler
   // over the on-air sample clock. The phase at the first sample of this slot is carried from the
   // previous slot, so the signal stays phase-continuous when the Doppler changes from slot to slot
   // (2*pi*f*abs_ts would jump by 2*pi*df*t at every slot) and across slots not transmitted (TDD UL).
-  // shortcut: one static phase state, valid because tx_rf runs in the single L1 TX thread with one RU.
+  // Applied after the delay line: the Doppler is that of the on-air instant.
   // The phasor also carries the beam-gain amplitude.
   double f_off = ru->tx_freq_offset_hz;
   const float amp = (float)ru->tx_amplitude;
   static double ntn_phase = 0.0, ntn_f_prev = 0.0, ntn_ts_prev = -1.0;
   // Absolute USRP sample index for sample 0 of this slot
-  const double abs_ts = (double)timestamp + (double)ru->ts_offset + (double)ntn_delay_samples;
+  const double abs_ts = (double)ntn_ts + (double)sf_extension;
   if (ntn_ts_prev >= 0.0)
     ntn_phase = fmod(ntn_phase + 2.0 * M_PI * ntn_f_prev * (abs_ts - ntn_ts_prev) / fs_hz, 2.0 * M_PI);
   ntn_ts_prev = abs_ts;
@@ -668,9 +690,8 @@ void tx_rf(RU_t *ru, int frame,int slot, uint64_t timestamp)
     float sin_d = sinf(delta_angle);
     float start_re = amp * cosf((float)ntn_phase);
     float start_im = amp * sinf((float)ntn_phase);
-    int buf_offset = get_samples_slot_timestamp(fp, slot);
     for (int ant = 0; ant < nt; ant++) {
-      c16_t *buf = (c16_t *)&ru->common.txdata[ant][buf_offset];
+      c16_t *buf = (c16_t *)txp[ant] + sf_extension;
       float pre = start_re, pim = start_im;
       for (int n = 0; n < siglen; n++) {
         float I = (float)buf[n].r;
@@ -687,7 +708,7 @@ void tx_rf(RU_t *ru, int frame,int slot, uint64_t timestamp)
 
   // prepare tx buffer pointers
   uint32_t txs = ru->rfdevice.trx_write_func(&ru->rfdevice,
-                                             timestamp + ru->ts_offset - sf_extension + ntn_delay_samples,
+                                             (uint64_t)ntn_ts,
                                              txp,
                                              siglen + sf_extension,
                                              nt,
@@ -696,7 +717,7 @@ void tx_rf(RU_t *ru, int frame,int slot, uint64_t timestamp)
         "[TXPATH] RU %d tx_rf, writing to TS %lu, %d.%d, unwrapped_frame %d, slot %d, flags %d, siglen+sf_extension %d, "
         "returned %d, E %f\n",
         ru->idx,
-        timestamp + ru->ts_offset - sf_extension + ntn_delay_samples,
+        (uint64_t)ntn_ts,
         frame,
         slot,
         proc->frame_tx_unwrap,

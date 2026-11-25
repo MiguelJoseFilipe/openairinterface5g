@@ -746,6 +746,13 @@ double nr_doppler_get_max_delay_s(void)
              : d_max;
 }
 
+double nr_doppler_get_min_delay_s(void)
+{
+  if (!g_doppler_ctx.table || g_doppler_ctx.delay_mode != NR_DOPPLER_DELAY_ABSOLUTE)
+    return 0.0;
+  return g_doppler_ctx.delay_ref_s;
+}
+
 int nr_doppler_get_sib19_period(void)
 {
   return g_doppler_ctx.sib19_period_frames;

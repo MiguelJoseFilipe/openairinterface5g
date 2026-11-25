@@ -168,6 +168,12 @@ double nr_doppler_get_delay_s(void);
 double nr_doppler_get_max_delay_s(void);
 
 /*
+ * Smallest value nr_doppler_get_delay_s() can return over the window (0.0 in relative mode or when
+ * OFF), the constant part of the delay that tx_rf() puts in the write timestamp.
+ */
+double nr_doppler_get_min_delay_s(void);
+
+/*
  * SIB19 ephemeris refresh period in frames ("SIB19 period = N" in config.txt,
  * default 100). 0 keeps the static ephemeris from the gNB configuration.
  */
