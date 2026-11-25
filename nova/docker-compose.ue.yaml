@@ -1,9 +1,10 @@
-# nrUE container. Cell settings from conf/nrue.band78.<prb>.env, radio from UE_USRP_ARGS:
+# nrUE container. Cell settings from conf/nrue.band78.<prb>.env, radio from UE_USRP_ARGS. Several nrUEs on one host:
+# each needs its own project, UE_NAME and, but one, a UE_NETWORK other than host (every nrUE names its TUN oaitun_ue1).
 #   docker compose -f docker-compose.ue.yaml --env-file conf/nrue.band78.106prb.env up -d
 services:
     nr_ue:
         image: ${UE_IMAGE:-oai-nr-ue:nova-fixes}
-        container_name: sa-nr-ue
+        container_name: ${UE_NAME:-sa-nr-ue}
         cap_drop:
             - ALL
         cap_add:
@@ -28,5 +29,5 @@ services:
             - /dev/bus/usb/:/dev/bus/usb/
         volumes:
             - ${UE_UICC:-./conf/nrue.uicc.conf}:/opt/oai-nr-ue/etc/nr-ue.conf
-        network_mode: "host"
+        network_mode: "${UE_NETWORK:-host}"
         cpuset: "${UE_CPUSET:-}"
